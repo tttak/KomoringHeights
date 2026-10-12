@@ -385,7 +385,7 @@ namespace Mate
 			if (pos.board_effect[Us].effect(to2) <= dec_num)
 				goto NextCandidate;
 		}
-		return make_move(from, to, Us, KNIGHT);
+		return make_move(from, to, pc);
 	}
 NextCandidate:;
 
