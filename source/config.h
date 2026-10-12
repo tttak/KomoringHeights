@@ -28,6 +28,12 @@
 //#define YANEURAOU_MATE_ENGINE            // やねうら王 詰将棋solver (2020/12/29～)
 //#define USER_ENGINE                      // ユーザーの思考エンジン
 
+// KomoringHeights: enable the T004 TT read-lock optimization in ordinary builds.
+// The actual thread count is checked at search start; multi-thread searches keep locks.
+#if defined(USER_ENGINE) && !defined(ENABLE_TT_SINGLE_THREAD_LOCK_OPT)
+#define ENABLE_TT_SINGLE_THREAD_LOCK_OPT
+#endif
+
 // --------------------
 //  CPUの種類、CPU拡張命令の使用の有無
 // --------------------
