@@ -17,6 +17,8 @@
 #include "search_result.hpp"
 #include "transposition_table.hpp"
 #include "usi_info.hpp"
+#include "root_iteration_stats.hpp"
+#include "adaptive_root_log.hpp"
 
 namespace komori {
 /**
@@ -55,6 +57,16 @@ class KomoringHeights {
    * @return 詰み手順
    */
   const std::vector<Move>& BestMoves() const { return best_moves_; }
+  bool HasCompletePv() const { return best_pv_complete_; }
+  void ValidateBestPv(const Position& root, bool root_or_node);
+#ifdef ENABLE_PV_TEST_HOOKS
+  std::string ValidateTestLine(const Position& root, bool root_or_node, const std::vector<Move>& moves) {
+    best_moves_ = moves;
+    ValidateBestPv(root, root_or_node);
+    return pv_status_;
+  }
+#endif
+  void PrintFinalStatistics(NodeState root_state) const;
 
   /**
    * @brief Search() の準備を行う。探索開始直前に main_thread から呼び出すこと。
@@ -134,7 +146,11 @@ class KomoringHeights {
    * @param inc_flag TCA の探索延長フラグ
    * @return 探索結果
    */
-  SearchResult SearchImpl(Node& n, PnDn thpn, PnDn thdn, MateLen len, std::uint32_t& inc_flag);
+  SearchResult SearchImpl(Node& n, PnDn thpn, PnDn thdn, MateLen len, std::uint32_t& inc_flag
+#ifdef ENABLE_ADAPTIVE_ROOT_THRESHOLD
+                          , adaptive_root::ReturnInfo* root_return = nullptr
+#endif
+                          );
 
   /// 現在の探索情報を取得する
   /// @pre メインスレッドから呼び出すこと
@@ -166,10 +182,33 @@ class KomoringHeights {
   PvList pv_list_;            ///< 各手に対する PV の一覧
   bool in_pv_search_{false};  ///< PV探索中かどうか
   MovePath pv_moves_;         ///< PVの手順
+  bool current_pv_complete_{false};
+  bool best_pv_complete_{false};
+  std::vector<Key> pv_path_keys_;  ///< Main-thread reconstruction cycle guard.
+  std::string pv_status_{"not_constructed"};
+  std::uint64_t pv_validation_nodes_{0};
+  std::uint64_t pv_nodes_{0};  ///< Root result/PV phases, including their sub-searches.
+  std::uint64_t root_decision_nodes_{0};
+  bool root_decided_{false};
+#ifdef ENABLE_ROOT_ITERATION_STATS
+  root_iteration_stats::Trace root_iteration_trace_;
+#endif
+#ifdef ENABLE_ADAPTIVE_ROOT_LOG
+  adaptive_root::Log adaptive_root_log_;
+#endif
+#ifdef ENABLE_ROOT_THRESHOLD_STATS
+  struct RootThresholdStats {
+    std::uint64_t calls{}, iterations{}, extensions{}, saturated{}, legacy_risks{};
+    PnDn pn{}, dn{}, max_pn{}, max_dn{};
+  } root_threshold_stats_;
+#endif
 
   std::atomic<bool> should_break_main_loop_{false};  ///< メインループを抜けるかどうか
   // sub thread が探索すべき局面。サブスレッドは mutex で排他せずに読むため、メインスレッドから起床を命じるときは
   // race condition にならないように注意する必要がある
+#ifdef ENABLE_TT_STATS
+  tt_stats::Phase dispatch_stats_phase_{tt_stats::Phase::kSearch};
+#endif
   std::vector<Move> moves_from_root_;                        ///< 探索開始局面
   MateLen mate_len_{MateLen::Zero()};                        ///< 探索手数
   std::uint32_t multi_pv_{1};                                ///< Multi PV の数

@@ -224,6 +224,7 @@ class RegularTable {
    * `entries_` の中から `GcSamplingEntries` 個のエントリの探索量を調べ、下位 `kGcRemovalRatio` のエントリを削除する。
    */
   void CollectGarbage(double gc_removal_ratio) {
+    TT_DETAIL_INC(regular_gc_calls);
     // Amount を kGcSamplingEntries 個だけサンプリングする
     std::size_t counted_num = 0;
     std::size_t idx = 0;
@@ -257,6 +258,7 @@ class RegularTable {
     for (auto&& entry : entries_) {
       const std::lock_guard lock(entry);
       if (!entry.IsNull() && entry.Amount() <= amount_threshold) {
+        TT_DETAIL_INC(regular_deleted);
         entry.SetNull();
       } else if (!entry.IsNull() && should_cut) {
         entry.CutAmount();
@@ -355,6 +357,7 @@ class RegularTable {
         if (ptr->IsNull()) {
           *ptr = entry;
           entry.SetNull();
+          TT_DETAIL_INC(regular_moved);
           break;
         }
       }

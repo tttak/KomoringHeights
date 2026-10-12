@@ -1,3 +1,4 @@
+#include <memory>
 #include "komoring_heights.hpp"
 #include "path_keys.hpp"
 #include "thread_initialization.hpp"
@@ -56,8 +57,9 @@ void PrintResult(bool is_mate_search, LoseKind kind, const std::string& pv_moves
           // - 自殺手           -> 無効な指し手扱いでエラーになってしまう
           // - timeout          -> go mate infinite で探索していたらエラーになってしまう
           //
-          // よって、現局面詰みのときに返せるいい感じの指し手はない。しょうがないので nomate を返す。
-          sync_cout << "checkmate nomate" << sync_endl;
+          // No portable nonempty USI move represents a zero-ply mate.
+          // Preserve proven in final_stats and never label this as disproven.
+          sync_cout << "checkmate timeout" << sync_endl;
         }
     }
   } else {
@@ -67,7 +69,25 @@ void PrintResult(bool is_mate_search, LoseKind kind, const std::string& pv_moves
 }  // namespace
 
 // USI拡張コマンド"user"が送られてくるとこの関数が呼び出される。実験に使ってください。
-void user_test(Position& pos, std::istringstream& is) {}
+void user_test(Position& pos, std::istringstream& is) {
+#ifdef ENABLE_PV_TEST_HOOKS
+  std::string command;
+  is >> command;
+  if (command != "validatepv") return;
+  const bool root_or_node = IsPosOrNode(pos);
+  auto node = std::make_unique<komori::Node>(pos, root_or_node);
+  std::vector<Move> moves;
+  std::string token;
+  while (is >> token) {
+    const Move move = USI::to_move(pos, token);
+    moves.push_back(move);
+    if (move == MOVE_NONE || !pos.pseudo_legal(move) || !pos.legal(move)) break;
+    node->DoMoveNoRepetition(move);
+  }
+  while (node->GetDepth() > 0) node->UndoMoveNoRepetition();
+  sync_cout << "info string pv_test_validation " << g_searcher.ValidateTestLine(pos, root_or_node, moves) << sync_endl;
+#endif
+}
 
 // USIに追加オプションを設定したいときは、この関数を定義すること。
 // USI::init()のなかからコールバックされる。
@@ -96,6 +116,9 @@ void Search::clear() {
 // この関数内で初期化を終わらせ、slaveスレッドを起動してThread::search()を呼び出す。
 // そのあとslaveスレッドを終了させ、ベストな指し手を返すこと。
 void MainThread::search() {
+#ifdef ENABLE_TT_SINGLE_THREAD_LOCK_OPT
+  komori::tt::read_lock_policy::BeginSearch(Threads.size());
+#endif
   // `go mate` で探索開始したときは true、`go` で探索開始したときは false
   const bool is_mate_search = Search::Limits.mate != 0;
   const bool is_root_or_node = IsPosOrNode(rootPos);
@@ -105,10 +128,21 @@ void MainThread::search() {
   Thread::search();
   Threads.wait_for_search_finished();
 
+  // Replay/validate the selected line only after every worker has finished.
+  // Its do_move calls retain the existing node-count definition and belong to PV.
+  if (g_search_result == komori::NodeState::kProven) {
+    g_searcher.ValidateBestPv(rootPos, is_root_or_node);
+  }
+#ifdef ENABLE_TT_STATS
+  for (const auto& line : komori::tt_stats::FinalLines()) { sync_cout << "info string tt_stats " << line << sync_endl; }
+#endif
+  g_searcher.PrintFinalStatistics(g_search_result);
+
   Move best_move = MOVE_NONE;
   if (g_search_result == komori::NodeState::kProven) {
     auto best_moves = g_searcher.BestMoves();
-    PrintResult(is_mate_search, LoseKind::kMate, komori::ToString(best_moves));
+    PrintResult(is_mate_search, g_searcher.HasCompletePv() ? LoseKind::kMate : LoseKind::kTimeout,
+                komori::ToString(best_moves));
 
     if (!best_moves.empty()) {
       best_move = best_moves[0];

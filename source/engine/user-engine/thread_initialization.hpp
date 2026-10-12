@@ -6,6 +6,7 @@
 
 #include "initial_estimation.hpp"
 #include "typedefs.hpp"
+#include "tt_stats.hpp"
 
 namespace komori {
 /**
@@ -19,6 +20,9 @@ inline void InitializeThread(std::uint32_t id, std::uint32_t num_threads) {
   tl_thread_id = id;
   tl_gc_thread = (id == num_threads - 1);
   InitBriefEvaluation(id);
+#ifdef ENABLE_TT_STATS
+  tt_stats::Bind(id);
+#endif
 }
 }  // namespace komori
 

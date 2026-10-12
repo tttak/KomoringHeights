@@ -11,6 +11,7 @@
 #include "../../types.h"
 #include "mate_len.hpp"
 #include "shared_exclusive_lock.hpp"
+#include "tt_stats.hpp"
 
 namespace komori::tt {
 /**
@@ -188,6 +189,7 @@ class RepetitionTable {
    * エントリをできるだけ手前に詰める。（コンパクション）
    */
   void CollectGarbage() {
+    TT_DETAIL_INC(repetition_gc_calls);
     // [erased_generation, generation_] の範囲のエントリだけを残す。
     const auto erased_generation = generation_ - kGcKeepGeneration;
 
@@ -206,6 +208,7 @@ class RepetitionTable {
     for (auto& entry : hash_table_) {
       if (entry.key != kEmptyKey && should_erase(entry)) {
         entry.key = kEmptyKey;
+        TT_DETAIL_INC(repetition_deleted);
       }
     }
 
@@ -219,6 +222,7 @@ class RepetitionTable {
         if (hash_table_[index].key == kEmptyKey) {
           hash_table_[index] = entry;
           entry.key = kEmptyKey;
+          TT_DETAIL_INC(repetition_moved);
           break;
         }
       }

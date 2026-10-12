@@ -36,6 +36,14 @@ constexpr std::uint64_t HashfullCheckInterval(std::uint64_t capacity) noexcept {
  */
 class SearchMonitor {
  public:
+  // User/budget stops are separate from internal DispatchSearch synchronization.
+  enum StopReason : std::uint32_t { kTimeLimit = 1, kNodeLimit = 2, kExternalStop = 4 };
+  struct FinalStatistics {
+    std::uint64_t nodes;
+    std::uint64_t time_us;
+    std::uint64_t nps;
+    std::uint32_t stop_reasons;
+  };
   /**
    * @brief 変数を初期化して探索を開始する。
    * @param tt_capacity 置換表のサイズ
@@ -65,12 +73,22 @@ class SearchMonitor {
     print_alarm_.Start(pv_interval);
     stop_check_.Start(100);
     stop_.store(false, std::memory_order_release);
+    stop_reasons_.store(0, std::memory_order_relaxed);
   }
 
   void Stop() { stop_.store(true, std::memory_order_release); }
   void ResetStop() {
-    const auto elapsed = Time.elapsed_from_ponderhit();
-    stop_.store(MoveCount() >= move_limit_ || elapsed >= time_limit_ || Threads.stop, std::memory_order_release);
+    stop_.store(CheckLimits(), std::memory_order_release);
+  }
+
+  /// Snapshot after all workers finish; NPS is the full-run average.
+  FinalStatistics FinalInfo() const {
+    const auto nodes = MoveCount();
+    const auto time_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - start_time_).count());
+    const auto nps = time_us == 0 ? 0 : static_cast<std::uint64_t>(
+        static_cast<long double>(nodes) * 1000000.0L / static_cast<long double>(time_us));
+    return {nodes, time_us, nps, stop_reasons_.load(std::memory_order_relaxed)};
   }
 
   /**
@@ -116,6 +134,11 @@ class SearchMonitor {
 
   /// 現在の探索局面数
   std::uint64_t MoveCount() const { return Threads.nodes_searched(); }
+#ifdef ENABLE_ADAPTIVE_ROOT_THRESHOLD
+  // Read-only root-boundary snapshot: no new clock/budget polling locations.
+  bool HasStopRequest() const { return stop_.load(std::memory_order_acquire) || Threads.stop; }
+  std::uint32_t StopFlags() const { return stop_reasons_.load(std::memory_order_relaxed); }
+#endif
   /// 今すぐ置換表使用率をチェックすべきなら true
   bool ShouldCheckHashfull() {
     hashfull_check_skip_--;
@@ -143,9 +166,15 @@ class SearchMonitor {
     }
 
     // stop_ かどうか改めて判定し直す
-    const auto elapsed = Time.elapsed_from_ponderhit();
-    stop_.store(MoveCount() >= move_limit_ || elapsed >= time_limit_ || Threads.stop, std::memory_order_release);
+    stop_.store(CheckLimits(), std::memory_order_release);
     return stop_;
+  }
+
+  // Reconstruction is outside the recursive search hot path. Check its budget
+  // at every extension rather than waiting for the search's periodic alarm.
+  bool ShouldStopPv() {
+    if (CheckLimits()) stop_.store(true, std::memory_order_release);
+    return stop_.load(std::memory_order_acquire);
   }
 
   /// 今すぐ評価値を出力すべきかどうか。定期的に呼び出す必要がある。
@@ -162,6 +191,16 @@ class SearchMonitor {
   }
 
  private:
+  bool CheckLimits() {
+    // Preserve existing check locations/cadence and latch simultaneous reasons.
+    const auto elapsed = Time.elapsed_from_ponderhit();
+    std::uint32_t reasons = 0;
+    if (MoveCount() >= move_limit_) reasons |= kNodeLimit;
+    if (elapsed >= time_limit_) reasons |= kTimeLimit;
+    if (Threads.stop) reasons |= kExternalStop;
+    if (reasons != 0) stop_reasons_.fetch_or(reasons, std::memory_order_relaxed);
+    return reasons != 0;
+  }
   /// nps の計算のために保持する探索局面数の履歴数
   static constexpr inline std::size_t kHistLen = 16;
 
@@ -182,6 +221,7 @@ class SearchMonitor {
 
   alignas(64) std::atomic<bool> stop_;  ///< 探索中止状態かどうか
   std::atomic<Depth> max_depth_;        ///< 最大探索深さ
+  std::atomic<std::uint32_t> stop_reasons_{0};
 };
 }  // namespace komori
 

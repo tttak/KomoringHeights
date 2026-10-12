@@ -10,6 +10,7 @@
 #include "mate_len.hpp"
 #include "shared_exclusive_lock.hpp"
 #include "typedefs.hpp"
+#include "tt_stats.hpp"
 
 namespace komori::tt {
 namespace detail {
@@ -324,26 +325,45 @@ class alignas(32) Entry {
    * が成り立つので LookUpExact() はそれほど必要ではないが、実際には優等局面・劣等局面よりも一致局面のほうが
    * 頻繁に現れ、かつ容易に一致局面かどうかの判定ができるため、別処理にしたほうが高速化できる。
    */
-  bool LookUp(Hand hand, Depth depth, MateLen len, PnDn& pn, PnDn& dn, bool& use_old_child) const noexcept {
+  bool LookUp(Hand hand, Depth depth, MateLen len, PnDn& pn, PnDn& dn, bool& use_old_child
+#ifdef ENABLE_TT_STATS
+              , tt_stats::LookupObservation* observation = nullptr
+#endif
+              ) const noexcept {
+#ifdef ENABLE_TT_STATS
+    const auto old_pn = pn; const auto old_dn = dn; const auto old_flag = use_old_child;
+#endif
     const auto depth16 = static_cast<std::int16_t>(depth);
 
     // 1. 現局面とエントリが一致
     const Hand entry_hand = hand_.load(std::memory_order_relaxed);
     if (entry_hand == hand) {
-      return LookUpExact(depth16, len, pn, dn, use_old_child);
+      const bool accepted = LookUpExact(depth16, len, pn, dn, use_old_child);
+#ifdef ENABLE_TT_STATS
+      if (observation) observation->Record(tt_stats::Relation::kExact, accepted, pn != old_pn || dn != old_dn, use_old_child != old_flag);
+#endif
+      return accepted;
     }
 
     // 2. 現局面が劣等局面
     const bool is_inferior = hand_is_equal_or_superior(entry_hand, hand);
     if (is_inferior) {
       // 劣等かつ優等な局面は一致局面だけ。つまり 3. の if 文は省略できる。
-      return LookUpInferior(depth16, len, pn, dn, use_old_child);
+      const bool accepted = LookUpInferior(depth16, len, pn, dn, use_old_child);
+#ifdef ENABLE_TT_STATS
+      if (observation) observation->Record(tt_stats::Relation::kInferior, accepted, pn != old_pn || dn != old_dn, use_old_child != old_flag);
+#endif
+      return accepted;
     }
 
     // 3. 現局面が優等局面
     const bool is_superior = hand_is_equal_or_superior(hand, entry_hand);
     if (is_superior) {
-      return LookUpSuperior(depth16, len, pn, dn, use_old_child);
+      const bool accepted = LookUpSuperior(depth16, len, pn, dn, use_old_child);
+#ifdef ENABLE_TT_STATS
+      if (observation) observation->Record(tt_stats::Relation::kSuperior, accepted, pn != old_pn || dn != old_dn, use_old_child != old_flag);
+#endif
+      return accepted;
     }
 
     // 優等でも劣等でもない局面。何もせずに返る

@@ -8,6 +8,8 @@
 #include <utility>
 
 #include "node.hpp"
+#include "or_defense_config.hpp"
+#include "tt_stats.hpp"
 #include "typedefs.hpp"
 
 namespace komori {
@@ -19,7 +21,7 @@ thread_local inline int tl_pt_values[] = {0, 0, 62, 7, 194, 184, 75, 154, 99, 13
 struct DfpnPlusParameters {
   PnDn or_pn_base = kPnDnUnit;              ///< OR node の pn 初期値
   PnDn or_dn_base = kPnDnUnit;              ///< OR node の dn 初期値
-  PnDn or_defense = kPnDnUnit;              ///< OR node で受け駒がたくさん利いている場合の pn 増分
+  PnDn or_defense = kOrDefenseBase;         ///< OR node で受け駒がたくさん利いている場合の pn 増分
   PnDn or_support = kPnDnUnit;              ///< OR node で攻め駒がたくさん利いている場合の dn 増分
   PnDn or_capture_gold_silver = kPnDnUnit;  ///< OR node で金銀を取る場合の dn 増分
   PnDn or_capture_others = kPnDnUnit;       ///< OR node でそれ以外の駒を取る場合の pn 増分
@@ -94,6 +96,11 @@ inline std::pair<PnDn, PnDn> InitialPnDnPlusOrNode(const Position& n, Move move)
   const auto attack_support = (attacker_bb & n.pieces(us)).pop_count();
   const auto defense_support = (attacker_bb & n.pieces(them)).pop_count();
 
+#ifdef ENABLE_INITIAL_ESTIMATE_STATS
+  tt_stats::initial_is_or = true;
+  tt_stats::initial_defense_branch = defense_support >= 2;
+#endif
+
   if (defense_support >= 2) {
     // たくさん受け駒が利いている場合は後回し
     pn += tl_dfpn_plus_parameters.or_defense;
@@ -123,6 +130,10 @@ inline std::pair<PnDn, PnDn> InitialPnDnPlusOrNode(const Position& n, Move move)
  * @return `n` を `move` で動かした局面の pn/dn の初期値
  */
 inline std::pair<PnDn, PnDn> InitialPnDnPlusAndNode(const Position& n, Move move) {
+#ifdef ENABLE_INITIAL_ESTIMATE_STATS
+  tt_stats::initial_is_or = false;
+  tt_stats::initial_defense_branch = false;
+#endif
   const Color us = n.side_to_move();
   const Color them = ~us;
   const Square to = to_sq(move);

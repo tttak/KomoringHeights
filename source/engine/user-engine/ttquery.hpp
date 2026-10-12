@@ -13,6 +13,11 @@
 #include "search_result.hpp"
 #include "ttentry.hpp"
 #include "typedefs.hpp"
+#include "tt_stats.hpp"
+#include "or_defense_config.hpp"
+#ifdef ENABLE_TT_SINGLE_THREAD_LOCK_OPT
+#include "tt_read_lock_policy.hpp"
+#endif
 
 namespace komori::tt {
 
@@ -95,36 +100,102 @@ class Query {
                       MateLen len,
                       InitialEvalFunc&& eval_func,
                       bool strict_lookup = false) const {
+#ifdef ENABLE_TT_SINGLE_THREAD_LOCK_OPT
+    // Select once per query, never once per probed slot. The mode is fixed
+    // before search; both primary and strict lookup use the same policy.
+    if (read_lock_policy::required) {
+      return LookUpImpl<true>(does_have_old_child, len, std::forward<InitialEvalFunc>(eval_func), strict_lookup);
+    }
+    return LookUpImpl<false>(does_have_old_child, len, std::forward<InitialEvalFunc>(eval_func), strict_lookup);
+  }
+
+ private:
+  template <bool kReadLockRequired, typename InitialEvalFunc>
+  SearchResult LookUpImpl(bool& does_have_old_child, MateLen len, InitialEvalFunc&& eval_func,
+                          bool strict_lookup) const {
+#endif
+    #ifdef ENABLE_TT_STATS
+    tt_stats::LookupObservation observation(strict_lookup);
+    #endif
     PnDn pn = 1;
     PnDn dn = 1;
     SearchAmount amount = 1;
 
     bool found_exact = false;
+#ifdef ENABLE_TT_LOOKUP_KEY_CACHE
+    // This Query key is immutable throughout the primary and strict traversal.
+    const Key lookup_board_key = board_key_;
+#endif
 
-    for (auto itr = initial_entry_pointer_; !itr->IsNull(); ++itr) {
+    for (auto itr = initial_entry_pointer_; TT_SLOT(observation.primary_slots, !itr->IsNull()); ++itr) {
+#ifdef ENABLE_TT_SINGLE_THREAD_LOCK_OPT
+      read_lock_policy::Guard<kReadLockRequired, Entry> lock(*itr);
+#else
       std::shared_lock lock(*itr);
+#endif
       // 本来は lock 後にも !itr->Null() のチェックが必要だが、itr->Hand() == kNullHand のとき itr->LookUp() が必ず
       // 失敗するので、このタイミングでのチェックは省略できる。
-      if (itr->IsFor(board_key_)) {
-        if (itr->LookUp(hand_, depth_, len, pn, dn, does_have_old_child)) {
+      if (itr->IsFor(
+#ifdef ENABLE_TT_LOOKUP_KEY_CACHE
+                      lookup_board_key
+#else
+                      board_key_
+#endif
+                      )) {
+        if (itr->LookUp(hand_, depth_, len, pn, dn, does_have_old_child
+#ifdef ENABLE_TT_STATS
+                        , &observation
+#endif
+                        )) {
+#ifdef ENABLE_TT_STATS
+          const auto old_amount = amount;
+#endif
           amount = std::max(amount, itr->Amount());
+#ifdef ENABLE_TT_STATS
+          if (amount != old_amount) observation.AmountChanged();
+#endif
           if (pn == 0) {
             Hand proof_hand = itr->GetHand();
             MateLen proven_len = itr->ProvenLen();
             if (strict_lookup) {
-              for (auto itr2 = ++itr; !itr2->IsNull(); ++itr2) {
+#ifdef ENABLE_TT_STATS_DETAIL
+              observation.strict_executed = true;
+#endif
+              for (auto itr2 = ++itr; TT_SLOT(observation.strict_slots, !itr2->IsNull()); ++itr2) {
+#ifdef ENABLE_TT_SINGLE_THREAD_LOCK_OPT
+                read_lock_policy::Guard<kReadLockRequired, Entry> lock2{*itr2};
+#else
                 std::shared_lock lock2{*itr2};
-                if (itr2->IsFor(board_key_) && itr2->UpdateProvenLen(hand_, proven_len)) {
+#endif
+                if (itr2->IsFor(
+#ifdef ENABLE_TT_LOOKUP_KEY_CACHE
+                                lookup_board_key
+#else
+                                board_key_
+#endif
+                                ) && itr2->UpdateProvenLen(hand_, proven_len)) {
                   proof_hand = itr2->GetHand();
+#ifdef ENABLE_TT_STATS_DETAIL
+                  ++observation.strict_len_updates;
+#endif
                 }
               }
             }
+#ifdef ENABLE_TT_STATS
+            observation.proven = true;
+#endif
             return SearchResult::MakeFinal<true>(proof_hand, proven_len, amount);
           } else if (dn == 0) {
+#ifdef ENABLE_TT_STATS
+            observation.disproven = true;
+#endif
             return SearchResult::MakeFinal<false>(itr->GetHand(), len, amount);
           } else if (itr->GetHand() == hand_) {
             if (itr->IsPossibleRepetition()) {
               if (const auto maybe_depth = rep_table_->Contains(path_key_)) {
+#ifdef ENABLE_TT_STATS
+                observation.repetition = true;
+#endif
                 return SearchResult::MakeRepetition(hand_, len, amount, *maybe_depth);
               }
             }
@@ -137,16 +208,28 @@ class Query {
     }
 
     if (found_exact) {
+#ifdef ENABLE_INITIAL_ESTIMATE_STATS
+      if (tt_stats::current) ++tt_stats::current->exact_initial_bypasses;
+#endif
       return SearchResult::MakeUnknown(pn, dn, len, amount);
     }
 
+#ifdef ENABLE_TT_STATS
+    observation.initial = true;
+#endif
     const auto [init_pn, init_dn] = std::forward<InitialEvalFunc>(eval_func)();
+#ifdef ENABLE_INITIAL_ESTIMATE_STATS
+    tt_stats::RecordInitialMerge(pn, dn, init_pn, init_dn, kOrDefenseBase);
+#endif
     pn = std::max(pn, init_pn);
     dn = std::max(dn, init_dn);
 
     return SearchResult::MakeFirstVisit(pn, dn, len, amount);
   }
   // LCOV_EXCL_STOP NOLINTEND
+#ifdef ENABLE_TT_SINGLE_THREAD_LOCK_OPT
+ public:
+#endif
 
   /**
    * @brief 探索結果 `result` を置換表に書き込む
@@ -154,6 +237,7 @@ class Query {
    * @note 実際の処理は `SetProven()`, `SetDisproven()`, `SetRepetition()`, `SetUnknown()` を参照。
    */
   void SetResult(const SearchResult& result) const noexcept {
+    TT_DETAIL_INC(update_calls);
     if (result.Pn() == 0) {
       SetFinal<true>(result);
     } else if (result.Dn() == 0) {
@@ -194,22 +278,32 @@ class Query {
    * @return 見つけた or 作成したエントリ。`lock()` された状態で返るので、参照が完了したら必ず `unlock()` を呼ぶこと。
    */
   Entry* FindOrCreate(Hand hand) const noexcept {
-    if (!cached_entry_->IsNull()) {
+#ifdef ENABLE_TT_STATS_DETAIL
+    tt_stats::WriteObservation observation;
+#endif
+    if (TT_SLOT(observation.slots, !cached_entry_->IsNull())) {
       cached_entry_->lock();
       if (cached_entry_->IsFor(board_key_, hand)) {
+        TT_DETAIL_INC(cached_updates);
+        TT_DETAIL_INC(existing_updates);
         return cached_entry_;
       }
       cached_entry_->unlock();
     }
 
     for (auto itr = initial_entry_pointer_;; ++itr) {
+#ifdef ENABLE_TT_STATS_DETAIL
+      ++observation.slots;
+#endif
       itr->lock();
       if (itr->IsNull()) {
         itr->Init(board_key_, hand, depth_);
+        TT_DETAIL_INC(new_entries);
         return cached_entry_ = &*itr;
       }
 
       if (itr->IsFor(board_key_, hand)) {
+        TT_DETAIL_INC(existing_updates);
         return cached_entry_ = &*itr;
       }
       itr->unlock();

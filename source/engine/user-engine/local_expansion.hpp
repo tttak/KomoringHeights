@@ -129,6 +129,7 @@ class LocalExpansion {
       queries_[i_raw] = tt.BuildChildQuery(n, move.move);
     }
 
+    TT_DETAIL_INC(expansion_frames);
     Relookup(tt, n, len, first_search, multi_pv, strict_lookup);
   }
 
@@ -158,6 +159,7 @@ class LocalExpansion {
                 bool first_search,
                 std::uint32_t multi_pv,
                 bool strict_lookup) {
+    TT_DETAIL_INC(relookup_calls);
     len_ = len;
     multi_pv_ = multi_pv;
     lazy_expansion_ = LazyExpansionTable{n, mp_};
@@ -272,6 +274,11 @@ class LocalExpansion {
       return GetUnknownResult(n);
     }
   }
+
+#if defined(ENABLE_ROOT_ITERATION_STATS) || defined(ENABLE_ADAPTIVE_ROOT_LOG)
+  // Pure scalar read: avoid constructing a proof hand or simulating a move.
+  std::pair<PnDn, PnDn> ObservedPnDn() const { return {GetPn(), GetDn()}; }
+#endif
 
   /**
    * @brief 最善手の子の評価値を更新する
