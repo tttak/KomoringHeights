@@ -161,6 +161,8 @@ struct EngineOption {
   std::string tt_read_path;   ///< TTを読み込むファイル名
   std::string tt_write_path;  ///< TTを書き込むファイル名
 
+  bool child_epsilon16{true};  ///< AND 子探索の 1+ε しきい値（ε=1/16）を使うか。false で従来の second_phi+1
+
   /// 探索結果を info string で出さない。ベンチマーク用のため `USI::OptionsMap` には登録しない
   bool silent{false};
   // NOLINTEND(misc-non-private-member-variables-in-classes)
@@ -178,6 +180,7 @@ struct EngineOption {
     o["ScoreCalculation"] << USI::Option(detail::score_caluclation_option.Keys(),
                                          detail::score_caluclation_option.DefaultKey());
     o["PostSearchLevel"] << USI::Option(detail::post_search_level.Keys(), detail::post_search_level.DefaultKey());
+    o["ChildEpsilon16"] << USI::Option(true);
 
 #if defined(USE_TT_SAVE_AND_LOAD)
     o["TTReadPath"] << USI::Option("");
@@ -200,6 +203,7 @@ struct EngineOption {
 
     score_method = detail::score_caluclation_option.Get(detail::ReadOption<std::string>(o, "ScoreCalculation"));
     post_search_level = detail::post_search_level.Get(detail::ReadOption<std::string>(o, "PostSearchLevel"));
+    child_epsilon16 = (detail::ReadOption(o, "ChildEpsilon16") != 0);
 
 #if defined(USE_TT_SAVE_AND_LOAD)
     tt_read_path = detail::ReadOption<std::string>(o, "TTReadPath");

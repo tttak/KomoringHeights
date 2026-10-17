@@ -78,6 +78,14 @@ class Query {
   /// Destructor
   ~Query() noexcept = default;
 
+#if !defined(DISABLE_CHILD_TT_PREFETCH) && (defined(__GNUC__) || defined(__clang__))
+  /// Prefetch the initial regular-TT entry without reading or changing it.
+  void PrefetchInitialEntry() const noexcept {
+    auto ptr = initial_entry_pointer_;
+    __builtin_prefetch(ptr.data(), 0, 1);
+  }
+#endif
+
   // テンプレート関数のカバレッジは悲しいことになるので取らない
   // LCOV_EXCL_START NOLINTBEGIN
 

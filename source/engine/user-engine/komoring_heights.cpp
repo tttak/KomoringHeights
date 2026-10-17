@@ -720,7 +720,10 @@ SearchResult KomoringHeights::SearchImpl(Node& n, PnDn thpn, PnDn thdn, MateLen 
     const auto best_move = local_expansion.BestMove();
     const bool is_first_search = local_expansion.FrontIsFirstVisit();
     if (is_first_search) { TT_EXPANSION_INC(expansion_first_by_tt); } else { TT_EXPANSION_INC(expansion_revisit_by_tt); }
-    const auto [child_thpn, child_thdn] = local_expansion.FrontPnDnThresholds(thpn, thdn);
+    // ChildEpsilon16（T079/T080）。Threads/main/option の条件を先に短絡評価し、副 thread では共有の in_pv_search_ を読まない
+    const bool epsilon_eligible =
+        option_.threads == 1 && tl_thread_id == 0 && option_.child_epsilon16 && !in_pv_search_;
+    const auto [child_thpn, child_thdn] = local_expansion.FrontPnDnThresholds(thpn, thdn, epsilon_eligible);
 
     n.DoMove(best_move);
 

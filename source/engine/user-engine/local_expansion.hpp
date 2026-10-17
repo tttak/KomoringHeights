@@ -19,6 +19,7 @@
 #include "transposition_table.hpp"
 #include "ttquery.hpp"
 #include "typedefs.hpp"
+#include "child_epsilon16.hpp"
 
 namespace komori {
 namespace detail {
@@ -166,7 +167,17 @@ class LocalExpansion {
     does_have_old_child_ = false;
     excluded_moves_ = 0;
     idx_.clear();
+#if !defined(DISABLE_CHILD_TT_PREFETCH) && (defined(__GNUC__) || defined(__clang__))
+    for (std::size_t i = 0; i < std::min<std::size_t>(4, mp_.size()); ++i) {
+      queries_[i].PrefetchInitialEntry();
+    }
+#endif
     for (const auto [i_raw, move] : WithIndex<std::uint32_t>(mp_)) {
+#if !defined(DISABLE_CHILD_TT_PREFETCH) && (defined(__GNUC__) || defined(__clang__))
+      if (i_raw + 4 < mp_.size()) {
+        queries_[i_raw + 4].PrefetchInitialEntry();
+      }
+#endif
       const tt::Query& query = queries_[i_raw];
       auto& result = results_[i_raw];
 
@@ -361,15 +372,20 @@ class LocalExpansion {
    * @pre !empty()
    * @param thpn 現局面の pn のしきい値
    * @param thdn 現局面の dn のしきい値
+   * @param epsilon_eligible 通常探索の主 thread で ChildEpsilon16 が有効なとき true（AND 子の 1+ε しきい値を許す）
    * @return 子局面の pn, dn のしきい値のペア
    */
-  std::pair<PnDn, PnDn> FrontPnDnThresholds(PnDn thpn, PnDn thdn) const {
+  std::pair<PnDn, PnDn> FrontPnDnThresholds(PnDn thpn, PnDn thdn, bool epsilon_eligible = false) const {
     // pn/dn で考えるよりも phi/delta で考えたほうがわかりやすい
     // そのため、いったん phi/delta の世界に変換して、最後にもとに戻す
 
     const auto thphi = Phi(thpn, thdn, or_node_);
     const auto thdelta = Delta(thpn, thdn, or_node_);
-    const auto child_thphi = std::min<PnDn>(thphi, GetSecondPhi() + 1);
+    auto child_thphi = std::min<PnDn>(thphi, GetSecondPhi() + 1);
+    // AND で有効な未確定の子が 2 つ以上あるときだけ、second_phi + 1 を 1+1/16 倍程度まで広げる（T079/T080）
+    if (epsilon_eligible && IsChildEpsilon16Target()) {
+      child_thphi = child_epsilon16::ExpandedChildThphi(thphi, GetSecondPhi());
+    }
     const auto child_thdelta = NewThdeltaForBestMove(thdelta);
 
     if (or_node_) {
@@ -444,6 +460,24 @@ class LocalExpansion {
     }
 
     return false;
+  }
+
+  /// 1+ε を適用する局面か（AND・非 Final・有効な未確定の子が 2 つ以上・0 < front_phi <= second_phi < ∞）
+  bool IsChildEpsilon16Target() const {
+    if (or_node_ || idx_.size() <= excluded_moves_ + 1) {
+      return false;
+    }
+    if (GetPhi() == 0 || GetDelta() == 0) {
+      return false;
+    }
+    const auto& front = results_[idx_[excluded_moves_]];
+    const auto& second = results_[idx_[excluded_moves_ + 1]];
+    if (front.IsFinal() || second.IsFinal()) {
+      return false;
+    }
+    const PnDn front_phi = front.Phi(or_node_);
+    const PnDn second_phi = second.Phi(or_node_);
+    return 0 < front_phi && front_phi <= second_phi && second_phi < kInfinitePnDn;
   }
 
   // <PnDn>
